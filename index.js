@@ -1,8 +1,9 @@
 // Servidor minimal compatível com seu front
-// - Sem banco de dados (evita 502/erros de build)
-// - Rotas que o front usa já presentes
+// - Sem banco de dados
+// - Rotas do front já presentes
 // - CORS liberado
-// - Token "fake" para não travar fluxo do front
+// - IA: usa OpenAI se OPENAI_API_KEY estiver definida; caso contrário, fallback
+// - Landing page no "/" para mostrar algo no navegador
 
 import express from "express";
 import cors from "cors";
@@ -17,58 +18,82 @@ app.set("x-powered-by", false);
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 
+// =============== LANDING PAGE (mostrar o app no navegador) ===============
+app.get("/", (_req, res) => {
+  res.type("html").send(`
+    <!doctype html>
+    <html lang="pt-BR">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Capacita API</title>
+        <style>
+          :root{--bg:#0f172a;--card:#111827;--ink:#e2e8f0;--muted:#94a3b8;--line:#1f2937;--brand:#0ea5e9}
+          body{background:var(--bg);color:var(--ink);margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+          .wrap{max-width:820px;margin:72px auto;padding:0 20px}
+          .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px}
+          h1{margin:0 0 10px}
+          p.muted{color:var(--muted);margin:0 0 10px}
+          .row{display:flex;gap:12px;margin-top:12px;flex-wrap:wrap}
+          a.btn{display:inline-block;padding:10px 16px;background:var(--brand);color:#fff;border-radius:10px;text-decoration:none}
+          code{background:var(--line);padding:2px 6px;border-radius:6px}
+        </style>
+      </head>
+      <body>
+        <div class="wrap">
+          <div class="card">
+            <h1>Capacita API ✅</h1>
+            <p class="muted">Seu backend está online. Use esta URL como base no frontend.</p>
+            <div class="row">
+              <a class="btn" href="/health">/health</a>
+              <a class="btn" href="/status">/status</a>
+            </div>
+            <p style="margin-top:14px">No frontend (Vercel), defina:<br />
+              <code>NEXT_PUBLIC_API_URL=${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code>
+            </p>
+          </div>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
 // =============== HEALTH & STATUS ===============
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, version: "1.0.0" });
+  res.json({ ok: true, version: "1.1.0" });
 });
 
 app.get("/status", (_req, res) => {
   res.json({
-    openai: !!process.env.OPENAI_API_KEY,   // opcional
-    stripe: !!process.env.STRIPE_SECRET,    // opcional
-    mercadopago: !!process.env.MP_ACCESS_TOKEN, // opcional
+    openai: !!process.env.OPENAI_API_KEY,           // IA disponível?
+    stripe: !!process.env.STRIPE_SECRET,            // opcional
+    mercadopago: !!process.env.MP_ACCESS_TOKEN,     // opcional
     web_url: process.env.WEB_URL || null
   });
 });
 
 // =============== AUTH (fake, para não quebrar o front) ===============
-const DEMO_USER = {
-  id: 1,
-  email: "demo@cap.ci",
-  name: "Demo User"
-};
-// Token estático só para satisfazer o front
+const DEMO_USER = { id: 1, email: "demo@cap.ci", name: "Demo User" };
 const FAKE_TOKEN = "demo-token";
 
 app.post("/auth/login", (req, res) => {
-  // aceita qualquer email/senha para simplificar
-  const { email = DEMO_USER.email, password = "123456" } = req.body || {};
-  res.json({
-    token: FAKE_TOKEN,
-    user: { id: DEMO_USER.id, email, name: "Aluno" }
-  });
+  const { email = DEMO_USER.email } = req.body || {};
+  res.json({ token: FAKE_TOKEN, user: { id: DEMO_USER.id, email, name: "Aluno" } });
 });
 
 app.post("/auth/register", (req, res) => {
   const { email, name = "Aluno", password } = req.body || {};
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email e senha são obrigatórios" });
-  }
-  res.json({
-    token: FAKE_TOKEN,
-    user: { id: Math.floor(Math.random() * 10000), email, name }
-  });
+  if (!email || !password) return res.status(400).json({ error: "Email e senha são obrigatórios" });
+  res.json({ token: FAKE_TOKEN, user: { id: Math.floor(Math.random() * 10000), email, name } });
 });
 
 // =============== MIDDLEWARE (opcional) ===============
 function optionalAuth(req, _res, next) {
-  // Seu front envia Authorization: Bearer <token>
-  // Aqui só seguimos em frente, sem validar
   req.user = { id: DEMO_USER.id, email: DEMO_USER.email, name: DEMO_USER.name };
   next();
 }
 
-// =============== MENTOR (com respostas variadas, sem OpenAI) ===============
+// =============== MENTOR (IA se houver chave; senão, fallback variado) ===============
 const fallbackTips = [
   "Faça 3 blocos de 25min (Pomodoro) hoje.",
   "Resuma cada aula em 5 linhas.",
@@ -89,11 +114,34 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
   const { message } = req.body || {};
   if (!message) return res.status(400).json({ error: "Mensagem vazia" });
 
-  // Sem OPENAI_API_KEY, respondemos com variações úteis (não repetitivas)
-  return res.json({ reply: pick3(message) });
+  // Se não houver chave, responde fallback
+  if (!process.env.OPENAI_API_KEY) {
+    return res.json({ reply: pick3(message), note: "fallback" });
+  }
+
+  try {
+    // import dinâmico para não quebrar se a lib não estiver instalada
+    const { default: OpenAI } = await import("openai");
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const r = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.6,
+      messages: [
+        { role: "system", content: "Você é um mentor prático, direto e motivador. Foque em passos acionáveis e curtos." },
+        { role: "user", content: message }
+      ]
+    });
+
+    const reply = r?.choices?.[0]?.message?.content?.trim();
+    return res.json({ reply: reply || pick3(message) });
+  } catch (e) {
+    console.error("Mentor/ask error:", e.message);
+    return res.json({ reply: pick3(message), note: "fallback-error" });
+  }
 });
 
-// =============== COURSES (geração por IA com fallback) ===============
+// =============== COURSES (IA se houver chave; senão, fallback) ===============
 function buildFallbackCourse(topic, language = "pt") {
   const modules = [
     {
@@ -130,13 +178,61 @@ function buildFallbackCourse(topic, language = "pt") {
 
 app.post("/courses/generate", optionalAuth, async (req, res) => {
   const { topic = "Excel para iniciantes", language = "pt" } = req.body || {};
-  // Como aqui é minimal, sempre devolvemos o fallback (sem OpenAI)
-  const course = buildFallbackCourse(topic, language);
-  // ID fake só para o front não quebrar
-  return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course });
+
+  if (!process.env.OPENAI_API_KEY) {
+    const course = buildFallbackCourse(topic, language);
+    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback" });
+  }
+
+  try {
+    const { default: OpenAI } = await import("openai");
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const prompt = `
+Gere um curso JSON válido sobre "${topic}" (${language}), exatamente no formato:
+{
+  "title": "",
+  "description": "",
+  "level": "",
+  "language": "${language}",
+  "duration": 6,
+  "tags": "",
+  "content": {
+    "modules": [
+      { "title": "", "text": "", "quiz": [ { "q": "", "options": ["",""], "a": 0 } ] }
+    ]
+  }
+}
+Apenas o JSON, sem comentários nem texto fora do JSON.`;
+
+    const r = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      messages: [{ role: "user", content: prompt }]
+    });
+
+    const raw = r?.choices?.[0]?.message?.content || "";
+    // Tenta extrair um bloco JSON
+    const jsonText = (raw.match(/\{[\s\S]*\}$/) || [raw])[0];
+    let json;
+    try {
+      json = JSON.parse(jsonText);
+    } catch {
+      // Se não parsear, usa fallback
+      const course = buildFallbackCourse(topic, language);
+      return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-parse" });
+    }
+
+    // devolve o curso gerado
+    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json });
+  } catch (e) {
+    console.error("Courses/generate error:", e.message);
+    const course = buildFallbackCourse(topic, language);
+    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error" });
+  }
 });
 
-// =============== PAYMENTS (status para não "quebrar" a UI) ===============
+// =============== PAYMENTS (status para /subscribe) ===============
 app.get("/payments/status", (_req, res) => {
   res.json({
     stripe: !!process.env.STRIPE_SECRET,
