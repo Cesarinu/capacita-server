@@ -1,24 +1,30 @@
-// Servidor minimal compatível com seu front
-// - Sem banco de dados
-// - Rotas do front já presentes
-// - CORS liberado
-// - IA: usa OpenAI se OPENAI_API_KEY estiver definida; caso contrário, fallback
-// - Landing page no "/" para mostrar algo no navegador
+// Capacita API — ESM
+// - .env (OPENAI_API_KEY)
+// - /status e /health
+// - /ai/ping testa OpenAI de verdade
+// - /mentor/ask e /courses/generate usam IA se houver chave, senão fallback
+// - Landing no "/"
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-app.set("x-powered-by", false);
+app.disable("x-powered-by");
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 
-// =============== LANDING PAGE (mostrar o app no navegador) ===============
+// ===== DIAGNÓSTICO DE INICIALIZAÇÃO (não vaza a chave) =====
+const HAS_OPENAI = !!process.env.OPENAI_API_KEY;
+console.log(
+  "[BOOT] OPENAI_API_KEY:",
+  HAS_OPENAI ? `sk-*** (len=${String(process.env.OPENAI_API_KEY).length})` : "NÃO definida"
+);
+
+// ===== LANDING (mostrar algo no navegador) =====
 app.get("/", (_req, res) => {
   res.type("html").send(`
     <!doctype html>
@@ -43,10 +49,11 @@ app.get("/", (_req, res) => {
         <div class="wrap">
           <div class="card">
             <h1>Capacita API ✅</h1>
-            <p class="muted">Seu backend está online. Use esta URL como base no frontend.</p>
+            <p class="muted">Backend online. Use esta URL como base no frontend.</p>
             <div class="row">
               <a class="btn" href="/health">/health</a>
               <a class="btn" href="/status">/status</a>
+              <a class="btn" href="/ai/ping">/ai/ping</a>
             </div>
             <p style="margin-top:14px">No frontend (Vercel), defina:<br />
               <code>NEXT_PUBLIC_API_URL=${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code>
@@ -58,42 +65,58 @@ app.get("/", (_req, res) => {
   `);
 });
 
-// =============== HEALTH & STATUS ===============
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, version: "1.1.0" });
-});
-
+// ===== HEALTH & STATUS =====
+app.get("/health", (_req, res) => res.json({ ok: true, version: "1.2.0" }));
 app.get("/status", (_req, res) => {
   res.json({
-    openai: !!process.env.OPENAI_API_KEY,           // IA disponível?
-    stripe: !!process.env.STRIPE_SECRET,            // opcional
-    mercadopago: !!process.env.MP_ACCESS_TOKEN,     // opcional
+    openai: !!process.env.OPENAI_API_KEY,
+    openai_key_len: process.env.OPENAI_API_KEY ? String(process.env.OPENAI_API_KEY).length : 0,
+    stripe: !!process.env.STRIPE_SECRET,
+    mercadopago: !!process.env.MP_ACCESS_TOKEN,
     web_url: process.env.WEB_URL || null
   });
 });
 
-// =============== AUTH (fake, para não quebrar o front) ===============
+// ===== TESTE REAL DE OPENAI =====
+app.get("/ai/ping", async (_req, res) => {
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(200).json({ ok: false, reason: "Sem OPENAI_API_KEY" });
+  }
+  try {
+    const { default: OpenAI } = await import("openai");
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    // chamada simples e barata para validar chave
+    const r = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: "Diga apenas: OK" }],
+      temperature: 0
+    });
+    const msg = r?.choices?.[0]?.message?.content?.trim() || "";
+    res.json({ ok: true, reply: msg });
+  } catch (e) {
+    console.error("[ERROR] /ai/ping:", e.message);
+    res.status(200).json({ ok: false, error: e.message });
+  }
+});
+
+// ===== AUTH (fake p/ não quebrar o front) =====
 const DEMO_USER = { id: 1, email: "demo@cap.ci", name: "Demo User" };
 const FAKE_TOKEN = "demo-token";
-
 app.post("/auth/login", (req, res) => {
   const { email = DEMO_USER.email } = req.body || {};
   res.json({ token: FAKE_TOKEN, user: { id: DEMO_USER.id, email, name: "Aluno" } });
 });
-
 app.post("/auth/register", (req, res) => {
   const { email, name = "Aluno", password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: "Email e senha são obrigatórios" });
   res.json({ token: FAKE_TOKEN, user: { id: Math.floor(Math.random() * 10000), email, name } });
 });
-
-// =============== MIDDLEWARE (opcional) ===============
-function optionalAuth(req, _res, next) {
+const optionalAuth = (req, _res, next) => {
   req.user = { id: DEMO_USER.id, email: DEMO_USER.email, name: DEMO_USER.name };
   next();
-}
+};
 
-// =============== MENTOR (IA se houver chave; senão, fallback variado) ===============
+// ===== MENTOR (IA se houver chave; senão, fallback) =====
 const fallbackTips = [
   "Faça 3 blocos de 25min (Pomodoro) hoje.",
   "Resuma cada aula em 5 linhas.",
@@ -105,25 +128,19 @@ const fallbackTips = [
   "Crie flashcards com termos-chave.",
   "Refaça o exercício mais difícil sem olhar a solução."
 ];
-function pick3(msg) {
+const pick3 = (msg) => {
   const s = [...fallbackTips].sort(() => 0.5 - Math.random()).slice(0, 3);
   return `Sobre "${msg}":\n- ${s[0]}\n- ${s[1]}\n- ${s[2]}`;
-}
+};
 
 app.post("/mentor/ask", optionalAuth, async (req, res) => {
   const { message } = req.body || {};
   if (!message) return res.status(400).json({ error: "Mensagem vazia" });
-
-  // Se não houver chave, responde fallback
-  if (!process.env.OPENAI_API_KEY) {
-    return res.json({ reply: pick3(message), note: "fallback" });
-  }
+  if (!process.env.OPENAI_API_KEY) return res.json({ reply: pick3(message), note: "fallback" });
 
   try {
-    // import dinâmico para não quebrar se a lib não estiver instalada
     const { default: OpenAI } = await import("openai");
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
     const r = await client.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.6,
@@ -132,38 +149,21 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
         { role: "user", content: message }
       ]
     });
-
     const reply = r?.choices?.[0]?.message?.content?.trim();
-    return res.json({ reply: reply || pick3(message) });
+    res.json({ reply: reply || pick3(message) });
   } catch (e) {
-    console.error("Mentor/ask error:", e.message);
-    return res.json({ reply: pick3(message), note: "fallback-error" });
+    console.error("[ERROR] mentor/ask:", e.message);
+    res.json({ reply: pick3(message), note: "fallback-error" });
   }
 });
 
-// =============== COURSES (IA se houver chave; senão, fallback) ===============
+// ===== COURSES (IA se houver chave; senão, fallback) =====
 function buildFallbackCourse(topic, language = "pt") {
   const modules = [
-    {
-      title: `Introdução a ${topic}`,
-      text: `Objetivos e visão geral de ${topic}. Aplicações práticas.`,
-      quiz: [{ q: `${topic} serve para quê?`, options: ["Automação", "Relatórios", "Ambos"], a: 2 }]
-    },
-    {
-      title: "Fundamentos Essenciais",
-      text: `Conceitos-chave, boas práticas e erros comuns.`,
-      quiz: [{ q: "Melhor prática?", options: ["Pular teoria", "Planejar estudo", "Evitar exercícios"], a: 1 }]
-    },
-    {
-      title: "Prática Guiada",
-      text: "Exercícios progressivos com exemplos do mundo real.",
-      quiz: [{ q: "Exercícios por dia?", options: ["1", "3", "10"], a: 1 }]
-    },
-    {
-      title: "Projeto Final",
-      text: "Construa um mini-projeto de 1h e publique (GitHub/Drive).",
-      quiz: [{ q: "Entrega final?", options: ["Resumo", "Projeto", "Prova"], a: 1 }]
-    }
+    { title: `Introdução a ${topic}`, text: `Objetivos e visão geral de ${topic}. Aplicações práticas.` },
+    { title: "Fundamentos Essenciais", text: `Conceitos-chave, boas práticas e erros comuns.` },
+    { title: "Prática Guiada", text: "Exercícios progressivos com exemplos do mundo real." },
+    { title: "Projeto Final", text: "Construa um mini-projeto de 1h e publique (GitHub/Drive)." }
   ];
   return {
     title: `${topic} (IA Fallback)`,
@@ -178,18 +178,15 @@ function buildFallbackCourse(topic, language = "pt") {
 
 app.post("/courses/generate", optionalAuth, async (req, res) => {
   const { topic = "Excel para iniciantes", language = "pt" } = req.body || {};
-
   if (!process.env.OPENAI_API_KEY) {
     const course = buildFallbackCourse(topic, language);
     return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback" });
   }
-
   try {
     const { default: OpenAI } = await import("openai");
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
     const prompt = `
-Gere um curso JSON válido sobre "${topic}" (${language}), exatamente no formato:
+Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
 {
   "title": "",
   "description": "",
@@ -197,42 +194,31 @@ Gere um curso JSON válido sobre "${topic}" (${language}), exatamente no formato
   "language": "${language}",
   "duration": 6,
   "tags": "",
-  "content": {
-    "modules": [
-      { "title": "", "text": "", "quiz": [ { "q": "", "options": ["",""], "a": 0 } ] }
-    ]
-  }
+  "content": { "modules": [ { "title": "", "text": "" } ] }
 }
 Apenas o JSON, sem comentários nem texto fora do JSON.`;
-
     const r = await client.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.7,
       messages: [{ role: "user", content: prompt }]
     });
-
     const raw = r?.choices?.[0]?.message?.content || "";
-    // Tenta extrair um bloco JSON
     const jsonText = (raw.match(/\{[\s\S]*\}$/) || [raw])[0];
     let json;
-    try {
-      json = JSON.parse(jsonText);
-    } catch {
-      // Se não parsear, usa fallback
+    try { json = JSON.parse(jsonText); }
+    catch {
       const course = buildFallbackCourse(topic, language);
       return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-parse" });
     }
-
-    // devolve o curso gerado
-    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json });
+    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json });
   } catch (e) {
-    console.error("Courses/generate error:", e.message);
+    console.error("[ERROR] courses/generate:", e.message);
     const course = buildFallbackCourse(topic, language);
-    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error" });
+    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error" });
   }
 });
 
-// =============== PAYMENTS (status para /subscribe) ===============
+// ===== PAYMENTS STATUS =====
 app.get("/payments/status", (_req, res) => {
   res.json({
     stripe: !!process.env.STRIPE_SECRET,
@@ -241,18 +227,16 @@ app.get("/payments/status", (_req, res) => {
   });
 });
 
-// =============== CERTIFICATES (fake mint) ===============
+// ===== CERTIFICATES (fake) =====
 app.post("/certificates/mint", optionalAuth, (_req, res) => {
   const tx = "0x" + Math.random().toString(16).slice(2).padEnd(64, "0");
   res.json({ ok: true, txHash: tx });
 });
 
-// =============== 404 ===============
-app.use((req, res) => {
-  res.status(404).json({ error: "Rota não encontrada" });
-});
+// ===== 404 =====
+app.use((_req, res) => res.status(404).json({ error: "Rota não encontrada" }));
 
-// =============== START ===============
+// ===== START =====
 app.listen(PORT, () => {
   console.log(`API on http://localhost:${PORT}`);
 });
