@@ -1,7 +1,7 @@
-// Capacita API — correção 401 OpenAI
-// - Sanitiza OPENAI_API_KEY (trim/sem aspas)
-// - Suporte a OPENAI_PROJECT (para chaves sk-proj-...)
-// - Endpoints de diagnóstico: /status, /ai/ping, /diag/env
+// Capacita API — OpenRouter (grátis)
+// - Usa OpenRouter no lugar da OpenAI paga
+// - Basta setar OPENAI_API_KEY (OpenRouter) e OPENAI_BASE_URL=https://openrouter.ai/api/v1
+// - Mantém as rotas existentes: /ai/ping, /mentor/ask, /courses/generate
 
 import express from "express";
 import cors from "cors";
@@ -15,25 +15,25 @@ app.disable("x-powered-by");
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 
-// ========== SANITIZAÇÃO DA CHAVE ==========
+// ========== SANITIZAÇÃO ==========
 function sanitize(v) {
   if (!v) return "";
   let x = String(v).trim();
-  // remove aspas acidentais
   if (x.startsWith('"') && x.endsWith('"')) x = x.slice(1, -1);
   if (x.startsWith("'") && x.endsWith("'")) x = x.slice(1, -1);
   return x.trim();
 }
 process.env.OPENAI_API_KEY = sanitize(process.env.OPENAI_API_KEY);
-process.env.OPENAI_PROJECT = sanitize(process.env.OPENAI_PROJECT) || sanitize(process.env.OPENAI_PROJECT_ID);
+process.env.OPENAI_BASE_URL = sanitize(process.env.OPENAI_BASE_URL) || "https://openrouter.ai/api/v1";
+process.env.APP_URL = sanitize(process.env.APP_URL) || sanitize(process.env.WEB_URL) || "https://capacita-web.vercel.app";
 
-// Logs seguros
+// ===== BOOT LOGS (sem vazar segredo) =====
 const hasKey = !!process.env.OPENAI_API_KEY;
 const keyLen = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0;
-const keyPrefix = process.env.OPENAI_API_KEY?.slice(0, 8) || "";
+const keyPrefix = process.env.OPENAI_API_KEY?.slice(0, 9) || "";
+console.log("[BOOT] OPENAI_BASE_URL:", process.env.OPENAI_BASE_URL);
 console.log("[BOOT] OPENAI_API_KEY:", hasKey ? `${keyPrefix}*** (len=${keyLen})` : "NÃO definida");
-console.log("[BOOT] OPENAI_PROJECT:", process.env.OPENAI_PROJECT || "(vazio)");
-console.log("[BOOT] PORT:", PORT);
+console.log("[BOOT] APP_URL:", process.env.APP_URL);
 
 // ===== Landing =====
 app.get("/", (_req, res) => {
@@ -53,69 +53,55 @@ app.get("/", (_req, res) => {
       <div class="wrap"><div class="card">
         <h1>Capacita API ✅</h1>
         <p>Use esta URL no frontend: <code>${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code></p>
-        <p><a class="btn" href="/health">/health</a><a class="btn" href="/status">/status</a><a class="btn" href="/ai/ping">/ai/ping</a><a class="btn" href="/diag/env">/diag/env</a></p>
+        <p><a class="btn" href="/health">/health</a><a class="btn" href="/status">/status</a><a class="btn" href="/ai/ping">/ai/ping</a></p>
       </div></div>
     </body></html>
   `);
 });
 
 // ===== Health & Status =====
-app.get("/health", (_req, res) => res.json({ ok: true, version: "fix-401-1.0.0" }));
+app.get("/health", (_req, res) => res.json({ ok: true, version: "openrouter-1.0.0" }));
 app.get("/status", (_req, res) => {
   res.json({
+    base_url: process.env.OPENAI_BASE_URL,
     openai: !!process.env.OPENAI_API_KEY,
     openai_key_len: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
-    openai_is_proj: process.env.OPENAI_API_KEY?.startsWith("sk-proj-") || false,
-    project_set: !!process.env.OPENAI_PROJECT,
     stripe: !!process.env.STRIPE_SECRET,
     mercadopago: !!process.env.MP_ACCESS_TOKEN,
-    web_url: process.env.WEB_URL || null
+    app_url: process.env.APP_URL
   });
 });
 
-// ===== Diagnóstico de env (não vaza segredo) =====
-app.get("/diag/env", (_req, res) => {
-  res.json({
-    openai_present: !!process.env.OPENAI_API_KEY,
-    openai_prefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.slice(0, 8) + "***" : null,
-    openai_len: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
-    is_proj_key: process.env.OPENAI_API_KEY?.startsWith("sk-proj-") || false,
-    project_present: !!process.env.OPENAI_PROJECT,
-    project_value_preview: process.env.OPENAI_PROJECT ? (process.env.OPENAI_PROJECT.slice(0, 8) + "...") : null
-  });
-});
-
-// ===== Helper para criar cliente OpenAI (com project) =====
-async function getOpenAI() {
+// ===== Cliente OpenRouter (usa SDK openai com baseURL) =====
+async function getLLM() {
   if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente");
   const { default: OpenAI } = await import("openai");
-  const opts = { apiKey: process.env.OPENAI_API_KEY };
-  // se a chave é de projeto, passamos o project id
-  if (process.env.OPENAI_API_KEY.startsWith("sk-proj-")) {
-    if (!process.env.OPENAI_PROJECT) {
-      throw new Error("OPENAI_PROJECT ausente para chave sk-proj-");
+  // Modelos grátis do OpenRouter variam — definimos um padrão e deixamos override por env
+  const MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-r1:free";
+  const client = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+    baseURL: process.env.OPENAI_BASE_URL,
+    // Cabeçalhos recomendados pelo OpenRouter (não obrigatórios, mas ajudam)
+    defaultHeaders: {
+      "HTTP-Referer": process.env.APP_URL,   // para rate limits mais generosos
+      "X-Title": "Capacita"
     }
-    opts.project = process.env.OPENAI_PROJECT;
-  }
-  return new OpenAI(opts);
+  });
+  return { client, MODEL };
 }
 
-// ===== Teste real OpenAI =====
+// ===== Teste real =====
 app.get("/ai/ping", async (_req, res) => {
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(200).json({ ok: false, error: "Sem OPENAI_API_KEY" });
-  }
   try {
-    const client = await getOpenAI();
+    const { client, MODEL } = await getLLM();
     const r = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: MODEL,
       messages: [{ role: "user", content: "Diga apenas: OK" }],
       temperature: 0
     });
     const msg = r?.choices?.[0]?.message?.content?.trim() || "";
-    res.json({ ok: true, reply: msg });
+    res.json({ ok: true, model: MODEL, reply: msg });
   } catch (e) {
-    // Deixa claro o que faltou
     res.status(200).json({ ok: false, error: String(e.message) });
   }
 });
@@ -141,7 +127,7 @@ const fallbackTips = [
   "Explique o que aprendeu em voz alta ou para alguém.",
   "Resolva 3 exercícios progressivos sobre o tema.",
   "Replique um exemplo real do YouTube/Docs oficiais.",
-  "Monte um mini-projeto de 1h e publique no GitHub.",
+  "Monte um mini-projeto de 1h e publique (GitHub/Drive).",
   "Anote 3 erros comuns que você cometeu.",
   "Crie flashcards com termos-chave.",
   "Refaça o exercício mais difícil sem olhar a solução."
@@ -157,9 +143,9 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
   if (!process.env.OPENAI_API_KEY) return res.json({ reply: pick3(message), note: "fallback" });
 
   try {
-    const client = await getOpenAI();
+    const { client, MODEL } = await getLLM();
     const r = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: MODEL,
       temperature: 0.6,
       messages: [
         { role: "system", content: "Você é um mentor prático, direto e motivador. Foque em passos acionáveis e curtos." },
@@ -167,7 +153,7 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
       ]
     });
     const reply = r?.choices?.[0]?.message?.content?.trim();
-    res.json({ reply: reply || pick3(message) });
+    res.json({ reply: reply || pick3(message), model: MODEL });
   } catch (e) {
     res.json({ reply: pick3(message), note: "fallback-error", error: String(e.message) });
   }
@@ -199,7 +185,7 @@ app.post("/courses/generate", optionalAuth, async (req, res) => {
     return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback" });
   }
   try {
-    const client = await getOpenAI();
+    const { client, MODEL } = await getLLM();
     const prompt = `
 Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
 {
@@ -213,7 +199,7 @@ Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
 }
 Apenas o JSON, sem comentários nem texto fora do JSON.`;
     const r = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: MODEL,
       temperature: 0.7,
       messages: [{ role: "user", content: prompt }]
     });
@@ -225,7 +211,7 @@ Apenas o JSON, sem comentários nem texto fora do JSON.`;
       const course = buildFallbackCourse(topic, language);
       return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-parse" });
     }
-    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json });
+    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json, model: MODEL });
   } catch (e) {
     const course = buildFallbackCourse(topic, language);
     res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error", error: String(e.message) });
@@ -237,7 +223,7 @@ app.get("/payments/status", (_req, res) => {
   res.json({
     stripe: !!process.env.STRIPE_SECRET,
     mercadopago: !!process.env.MP_ACCESS_TOKEN,
-    web_url: process.env.WEB_URL || null
+    web_url: process.env.APP_URL
   });
 });
 app.post("/certificates/mint", optionalAuth, (_req, res) => {
