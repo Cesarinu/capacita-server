@@ -1,9 +1,7 @@
-// Capacita API — ESM
-// - .env (OPENAI_API_KEY)
-// - /status e /health
-// - /ai/ping testa OpenAI de verdade
-// - /mentor/ask e /courses/generate usam IA se houver chave, senão fallback
-// - Landing no "/"
+// Capacita API — correção 401 OpenAI
+// - Sanitiza OPENAI_API_KEY (trim/sem aspas)
+// - Suporte a OPENAI_PROJECT (para chaves sk-proj-...)
+// - Endpoints de diagnóstico: /status, /ai/ping, /diag/env
 
 import express from "express";
 import cors from "cors";
@@ -17,78 +15,98 @@ app.disable("x-powered-by");
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 
-// ===== DIAGNÓSTICO DE INICIALIZAÇÃO (não vaza a chave) =====
-const HAS_OPENAI = !!process.env.OPENAI_API_KEY;
-console.log(
-  "[BOOT] OPENAI_API_KEY:",
-  HAS_OPENAI ? `sk-*** (len=${String(process.env.OPENAI_API_KEY).length})` : "NÃO definida"
-);
+// ========== SANITIZAÇÃO DA CHAVE ==========
+function sanitize(v) {
+  if (!v) return "";
+  let x = String(v).trim();
+  // remove aspas acidentais
+  if (x.startsWith('"') && x.endsWith('"')) x = x.slice(1, -1);
+  if (x.startsWith("'") && x.endsWith("'")) x = x.slice(1, -1);
+  return x.trim();
+}
+process.env.OPENAI_API_KEY = sanitize(process.env.OPENAI_API_KEY);
+process.env.OPENAI_PROJECT = sanitize(process.env.OPENAI_PROJECT) || sanitize(process.env.OPENAI_PROJECT_ID);
 
-// ===== LANDING (mostrar algo no navegador) =====
+// Logs seguros
+const hasKey = !!process.env.OPENAI_API_KEY;
+const keyLen = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0;
+const keyPrefix = process.env.OPENAI_API_KEY?.slice(0, 8) || "";
+console.log("[BOOT] OPENAI_API_KEY:", hasKey ? `${keyPrefix}*** (len=${keyLen})` : "NÃO definida");
+console.log("[BOOT] OPENAI_PROJECT:", process.env.OPENAI_PROJECT || "(vazio)");
+console.log("[BOOT] PORT:", PORT);
+
+// ===== Landing =====
 app.get("/", (_req, res) => {
   res.type("html").send(`
-    <!doctype html>
-    <html lang="pt-BR">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>Capacita API</title>
-        <style>
-          :root{--bg:#0f172a;--card:#111827;--ink:#e2e8f0;--muted:#94a3b8;--line:#1f2937;--brand:#0ea5e9}
-          body{background:var(--bg);color:var(--ink);margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
-          .wrap{max-width:820px;margin:72px auto;padding:0 20px}
-          .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px}
-          h1{margin:0 0 10px}
-          p.muted{color:var(--muted);margin:0 0 10px}
-          .row{display:flex;gap:12px;margin-top:12px;flex-wrap:wrap}
-          a.btn{display:inline-block;padding:10px 16px;background:var(--brand);color:#fff;border-radius:10px;text-decoration:none}
-          code{background:var(--line);padding:2px 6px;border-radius:6px}
-        </style>
-      </head>
-      <body>
-        <div class="wrap">
-          <div class="card">
-            <h1>Capacita API ✅</h1>
-            <p class="muted">Backend online. Use esta URL como base no frontend.</p>
-            <div class="row">
-              <a class="btn" href="/health">/health</a>
-              <a class="btn" href="/status">/status</a>
-              <a class="btn" href="/ai/ping">/ai/ping</a>
-            </div>
-            <p style="margin-top:14px">No frontend (Vercel), defina:<br />
-              <code>NEXT_PUBLIC_API_URL=${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code>
-            </p>
-          </div>
-        </div>
-      </body>
-    </html>
+    <!doctype html><html lang="pt-BR"><head>
+      <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+      <title>Capacita API</title>
+      <style>
+        :root{--bg:#0f172a;--card:#111827;--ink:#e2e8f0;--muted:#94a3b8;--line:#1f2937;--brand:#0ea5e9}
+        body{background:var(--bg);color:var(--ink);margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+        .wrap{max-width:820px;margin:72px auto;padding:0 20px}
+        .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px}
+        a.btn{display:inline-block;padding:10px 16px;background:var(--brand);color:#fff;border-radius:10px;text-decoration:none;margin-right:10px}
+        code{background:var(--line);padding:2px 6px;border-radius:6px}
+      </style>
+    </head><body>
+      <div class="wrap"><div class="card">
+        <h1>Capacita API ✅</h1>
+        <p>Use esta URL no frontend: <code>${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code></p>
+        <p><a class="btn" href="/health">/health</a><a class="btn" href="/status">/status</a><a class="btn" href="/ai/ping">/ai/ping</a><a class="btn" href="/diag/env">/diag/env</a></p>
+      </div></div>
+    </body></html>
   `);
 });
 
-// ===== HEALTH & STATUS =====
-app.get("/health", (_req, res) => res.json({ ok: true, version: "1.2.0" }));
+// ===== Health & Status =====
+app.get("/health", (_req, res) => res.json({ ok: true, version: "fix-401-1.0.0" }));
 app.get("/status", (_req, res) => {
   res.json({
     openai: !!process.env.OPENAI_API_KEY,
-    openai_key_len: process.env.OPENAI_API_KEY ? String(process.env.OPENAI_API_KEY).length : 0,
+    openai_key_len: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
+    openai_is_proj: process.env.OPENAI_API_KEY?.startsWith("sk-proj-") || false,
+    project_set: !!process.env.OPENAI_PROJECT,
     stripe: !!process.env.STRIPE_SECRET,
     mercadopago: !!process.env.MP_ACCESS_TOKEN,
     web_url: process.env.WEB_URL || null
   });
 });
 
-// ===== TESTE REAL DE OPENAI =====
+// ===== Diagnóstico de env (não vaza segredo) =====
+app.get("/diag/env", (_req, res) => {
+  res.json({
+    openai_present: !!process.env.OPENAI_API_KEY,
+    openai_prefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.slice(0, 8) + "***" : null,
+    openai_len: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
+    is_proj_key: process.env.OPENAI_API_KEY?.startsWith("sk-proj-") || false,
+    project_present: !!process.env.OPENAI_PROJECT,
+    project_value_preview: process.env.OPENAI_PROJECT ? (process.env.OPENAI_PROJECT.slice(0, 8) + "...") : null
+  });
+});
+
+// ===== Helper para criar cliente OpenAI (com project) =====
+async function getOpenAI() {
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente");
+  const { default: OpenAI } = await import("openai");
+  const opts = { apiKey: process.env.OPENAI_API_KEY };
+  // se a chave é de projeto, passamos o project id
+  if (process.env.OPENAI_API_KEY.startsWith("sk-proj-")) {
+    if (!process.env.OPENAI_PROJECT) {
+      throw new Error("OPENAI_PROJECT ausente para chave sk-proj-");
+    }
+    opts.project = process.env.OPENAI_PROJECT;
+  }
+  return new OpenAI(opts);
+}
+
+// ===== Teste real OpenAI =====
 app.get("/ai/ping", async (_req, res) => {
   if (!process.env.OPENAI_API_KEY) {
-    return res.status(200).json({ ok: false, reason: "Sem OPENAI_API_KEY" });
+    return res.status(200).json({ ok: false, error: "Sem OPENAI_API_KEY" });
   }
   try {
-    const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      project: process.env.OPENAI_PROJECT || process.env.OPENAI_PROJECT_ID || undefined
-    });
-    // chamada simples e barata para validar chave
+    const client = await getOpenAI();
     const r = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: "Diga apenas: OK" }],
@@ -97,12 +115,12 @@ app.get("/ai/ping", async (_req, res) => {
     const msg = r?.choices?.[0]?.message?.content?.trim() || "";
     res.json({ ok: true, reply: msg });
   } catch (e) {
-    console.error("[ERROR] /ai/ping:", e.message);
-    res.status(200).json({ ok: false, error: e.message });
+    // Deixa claro o que faltou
+    res.status(200).json({ ok: false, error: String(e.message) });
   }
 });
 
-// ===== AUTH (fake p/ não quebrar o front) =====
+// ===== Auth fake =====
 const DEMO_USER = { id: 1, email: "demo@cap.ci", name: "Demo User" };
 const FAKE_TOKEN = "demo-token";
 app.post("/auth/login", (req, res) => {
@@ -114,12 +132,9 @@ app.post("/auth/register", (req, res) => {
   if (!email || !password) return res.status(400).json({ error: "Email e senha são obrigatórios" });
   res.json({ token: FAKE_TOKEN, user: { id: Math.floor(Math.random() * 10000), email, name } });
 });
-const optionalAuth = (req, _res, next) => {
-  req.user = { id: DEMO_USER.id, email: DEMO_USER.email, name: DEMO_USER.name };
-  next();
-};
+const optionalAuth = (req, _res, next) => { req.user = DEMO_USER; next(); };
 
-// ===== MENTOR (IA se houver chave; senão, fallback) =====
+// ===== Mentor =====
 const fallbackTips = [
   "Faça 3 blocos de 25min (Pomodoro) hoje.",
   "Resuma cada aula em 5 linhas.",
@@ -142,11 +157,7 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
   if (!process.env.OPENAI_API_KEY) return res.json({ reply: pick3(message), note: "fallback" });
 
   try {
-    const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      project: process.env.OPENAI_PROJECT || process.env.OPENAI_PROJECT_ID || undefined
-    });
+    const client = await getOpenAI();
     const r = await client.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.6,
@@ -158,12 +169,11 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
     const reply = r?.choices?.[0]?.message?.content?.trim();
     res.json({ reply: reply || pick3(message) });
   } catch (e) {
-    console.error("[ERROR] mentor/ask:", e.message);
-    res.json({ reply: pick3(message), note: "fallback-error" });
+    res.json({ reply: pick3(message), note: "fallback-error", error: String(e.message) });
   }
 });
 
-// ===== COURSES (IA se houver chave; senão, fallback) =====
+// ===== Courses =====
 function buildFallbackCourse(topic, language = "pt") {
   const modules = [
     { title: `Introdução a ${topic}`, text: `Objetivos e visão geral de ${topic}. Aplicações práticas.` },
@@ -189,11 +199,7 @@ app.post("/courses/generate", optionalAuth, async (req, res) => {
     return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback" });
   }
   try {
-    const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      project: process.env.OPENAI_PROJECT || process.env.OPENAI_PROJECT_ID || undefined
-    });
+    const client = await getOpenAI();
     const prompt = `
 Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
 {
@@ -221,13 +227,12 @@ Apenas o JSON, sem comentários nem texto fora do JSON.`;
     }
     res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json });
   } catch (e) {
-    console.error("[ERROR] courses/generate:", e.message);
     const course = buildFallbackCourse(topic, language);
-    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error" });
+    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error", error: String(e.message) });
   }
 });
 
-// ===== PAYMENTS STATUS =====
+// ===== Payments & Certificates =====
 app.get("/payments/status", (_req, res) => {
   res.json({
     stripe: !!process.env.STRIPE_SECRET,
@@ -235,8 +240,6 @@ app.get("/payments/status", (_req, res) => {
     web_url: process.env.WEB_URL || null
   });
 });
-
-// ===== CERTIFICATES (fake) =====
 app.post("/certificates/mint", optionalAuth, (_req, res) => {
   const tx = "0x" + Math.random().toString(16).slice(2).padEnd(64, "0");
   res.json({ ok: true, txHash: tx });
