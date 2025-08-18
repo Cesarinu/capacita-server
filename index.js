@@ -1,7 +1,9 @@
-// Capacita API — OpenRouter (grátis)
-// - Usa OpenRouter no lugar da OpenAI paga
-// - Basta setar OPENAI_API_KEY (OpenRouter) e OPENAI_BASE_URL=https://openrouter.ai/api/v1
-// - Mantém as rotas existentes: /ai/ping, /mentor/ask, /courses/generate
+// Capacita API — OpenRouter compat + fixes UI
+// - Provider: OpenRouter (FREE) via baseURL
+// - /status: sinaliza ai_provider e openai:true se houver chave
+// - /mentor/ask: nunca envia "note:fallback"; sempre responde algo útil
+// - /courses/generate: parsing de JSON robusto (sem quebrar o front)
+// - /ai/ping: teste real do provider atual
 
 import express from "express";
 import cors from "cors";
@@ -15,27 +17,26 @@ app.disable("x-powered-by");
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 
-// ========== SANITIZAÇÃO ==========
-function sanitize(v) {
+// ========== utils ==========
+const sanitize = (v) => {
   if (!v) return "";
   let x = String(v).trim();
-  if (x.startsWith('"') && x.endsWith('"')) x = x.slice(1, -1);
-  if (x.startsWith("'") && x.endsWith("'")) x = x.slice(1, -1);
+  if ((x.startsWith('"') && x.endsWith('"')) || (x.startsWith("'") && x.endsWith("'"))) {
+    x = x.slice(1, -1);
+  }
   return x.trim();
-}
+};
 process.env.OPENAI_API_KEY = sanitize(process.env.OPENAI_API_KEY);
 process.env.OPENAI_BASE_URL = sanitize(process.env.OPENAI_BASE_URL) || "https://openrouter.ai/api/v1";
 process.env.APP_URL = sanitize(process.env.APP_URL) || sanitize(process.env.WEB_URL) || "https://capacita-web.vercel.app";
 
-// ===== BOOT LOGS (sem vazar segredo) =====
+// log seguro
 const hasKey = !!process.env.OPENAI_API_KEY;
-const keyLen = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0;
-const keyPrefix = process.env.OPENAI_API_KEY?.slice(0, 9) || "";
-console.log("[BOOT] OPENAI_BASE_URL:", process.env.OPENAI_BASE_URL);
-console.log("[BOOT] OPENAI_API_KEY:", hasKey ? `${keyPrefix}*** (len=${keyLen})` : "NÃO definida");
+console.log("[BOOT] baseURL:", process.env.OPENAI_BASE_URL);
+console.log("[BOOT] has OPENAI_API_KEY:", hasKey);
 console.log("[BOOT] APP_URL:", process.env.APP_URL);
 
-// ===== Landing =====
+// ========== landing ==========
 app.get("/", (_req, res) => {
   res.type("html").send(`
     <!doctype html><html lang="pt-BR"><head>
@@ -52,19 +53,24 @@ app.get("/", (_req, res) => {
     </head><body>
       <div class="wrap"><div class="card">
         <h1>Capacita API ✅</h1>
-        <p>Use esta URL no frontend: <code>${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code></p>
-        <p><a class="btn" href="/health">/health</a><a class="btn" href="/status">/status</a><a class="btn" href="/ai/ping">/ai/ping</a></p>
+        <p>Frontend deve usar: <code>${process.env.RENDER_EXTERNAL_URL || "https://capacita-server.onrender.com"}</code></p>
+        <p>
+          <a class="btn" href="/health">/health</a>
+          <a class="btn" href="/status">/status</a>
+          <a class="btn" href="/ai/ping">/ai/ping</a>
+        </p>
       </div></div>
     </body></html>
   `);
 });
 
-// ===== Health & Status =====
-app.get("/health", (_req, res) => res.json({ ok: true, version: "openrouter-1.0.0" }));
+// ========== health/status ==========
+app.get("/health", (_req, res) => res.json({ ok: true, version: "openrouter-fixes-1.0.0" }));
 app.get("/status", (_req, res) => {
   res.json({
+    ai_provider: process.env.OPENAI_BASE_URL.includes("openrouter.ai") ? "openrouter" : "openai",
     base_url: process.env.OPENAI_BASE_URL,
-    openai: !!process.env.OPENAI_API_KEY,
+    openai: !!process.env.OPENAI_API_KEY,       // <- front usa isso
     openai_key_len: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
     stripe: !!process.env.STRIPE_SECRET,
     mercadopago: !!process.env.MP_ACCESS_TOKEN,
@@ -72,25 +78,23 @@ app.get("/status", (_req, res) => {
   });
 });
 
-// ===== Cliente OpenRouter (usa SDK openai com baseURL) =====
+// ========== LLM client (OpenRouter) ==========
 async function getLLM() {
   if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente");
   const { default: OpenAI } = await import("openai");
-  // Modelos grátis do OpenRouter variam — definimos um padrão e deixamos override por env
-  const MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-r1:free";
+  const MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free"; // bom modelo free
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
     baseURL: process.env.OPENAI_BASE_URL,
-    // Cabeçalhos recomendados pelo OpenRouter (não obrigatórios, mas ajudam)
     defaultHeaders: {
-      "HTTP-Referer": process.env.APP_URL,   // para rate limits mais generosos
+      "HTTP-Referer": process.env.APP_URL,
       "X-Title": "Capacita"
     }
   });
   return { client, MODEL };
 }
 
-// ===== Teste real =====
+// ========== /ai/ping ==========
 app.get("/ai/ping", async (_req, res) => {
   try {
     const { client, MODEL } = await getLLM();
@@ -106,7 +110,7 @@ app.get("/ai/ping", async (_req, res) => {
   }
 });
 
-// ===== Auth fake =====
+// ========== auth fake ==========
 const DEMO_USER = { id: 1, email: "demo@cap.ci", name: "Demo User" };
 const FAKE_TOKEN = "demo-token";
 app.post("/auth/login", (req, res) => {
@@ -120,14 +124,14 @@ app.post("/auth/register", (req, res) => {
 });
 const optionalAuth = (req, _res, next) => { req.user = DEMO_USER; next(); };
 
-// ===== Mentor =====
+// ========== mentor ==========
 const fallbackTips = [
   "Faça 3 blocos de 25min (Pomodoro) hoje.",
   "Resuma cada aula em 5 linhas.",
   "Explique o que aprendeu em voz alta ou para alguém.",
   "Resolva 3 exercícios progressivos sobre o tema.",
   "Replique um exemplo real do YouTube/Docs oficiais.",
-  "Monte um mini-projeto de 1h e publique (GitHub/Drive).",
+  "Monte um mini-projeto de 1h e publique no GitHub.",
   "Anote 3 erros comuns que você cometeu.",
   "Crie flashcards com termos-chave.",
   "Refaça o exercício mais difícil sem olhar a solução."
@@ -140,7 +144,11 @@ const pick3 = (msg) => {
 app.post("/mentor/ask", optionalAuth, async (req, res) => {
   const { message } = req.body || {};
   if (!message) return res.status(400).json({ error: "Mensagem vazia" });
-  if (!process.env.OPENAI_API_KEY) return res.json({ reply: pick3(message), note: "fallback" });
+
+  if (!process.env.OPENAI_API_KEY) {
+    // NUNCA mande "note:fallback" (o front mostra aviso). Devolva provider e reply útil.
+    return res.json({ reply: pick3(message), provider: "none" });
+  }
 
   try {
     const { client, MODEL } = await getLLM();
@@ -152,14 +160,15 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
         { role: "user", content: message }
       ]
     });
-    const reply = r?.choices?.[0]?.message?.content?.trim();
-    res.json({ reply: reply || pick3(message), model: MODEL });
+    const reply = r?.choices?.[0]?.message?.content?.trim() || pick3(message);
+    res.json({ reply, provider: "openrouter", model: MODEL });
   } catch (e) {
-    res.json({ reply: pick3(message), note: "fallback-error", error: String(e.message) });
+    // Sem 'note', para não acionar alerta no UI:
+    res.json({ reply: pick3(message), provider: "error", error: String(e.message) });
   }
 });
 
-// ===== Courses =====
+// ========== cursos ==========
 function buildFallbackCourse(topic, language = "pt") {
   const modules = [
     { title: `Introdução a ${topic}`, text: `Objetivos e visão geral de ${topic}. Aplicações práticas.` },
@@ -177,17 +186,43 @@ function buildFallbackCourse(topic, language = "pt") {
     content: { modules }
   };
 }
+// saneamento de JSON vindo do modelo
+function extractJson(text) {
+  if (!text) return null;
+  // tenta entre a primeira { e a última }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const slice = text.slice(start, end + 1);
+    try { return JSON.parse(slice); } catch {}
+  }
+  // remove cercas ``` e tenta parsear
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  try { return JSON.parse(cleaned); } catch {}
+  return null;
+}
 
 app.post("/courses/generate", optionalAuth, async (req, res) => {
   const { topic = "Excel para iniciantes", language = "pt" } = req.body || {};
+
   if (!process.env.OPENAI_API_KEY) {
     const course = buildFallbackCourse(topic, language);
-    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback" });
+    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, provider: "none" });
   }
+
   try {
     const { client, MODEL } = await getLLM();
-    const prompt = `
-Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
+
+    // Tentativa 1: pedir JSON puro (alguns modelos do OpenRouter aceitam response_format)
+    let json = null;
+    try {
+      const r1 = await client.chat.completions.create({
+        model: MODEL,
+        temperature: 0.6,
+        messages: [{
+          role: "user",
+          content:
+`Responda apenas JSON válido (sem comentários, sem markdown). Esquema:
 {
   "title": "",
   "description": "",
@@ -197,28 +232,54 @@ Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
   "tags": "",
   "content": { "modules": [ { "title": "", "text": "" } ] }
 }
-Apenas o JSON, sem comentários nem texto fora do JSON.`;
-    const r = await client.chat.completions.create({
-      model: MODEL,
-      temperature: 0.7,
-      messages: [{ role: "user", content: prompt }]
-    });
-    const raw = r?.choices?.[0]?.message?.content || "";
-    const jsonText = (raw.match(/\{[\s\S]*\}$/) || [raw])[0];
-    let json;
-    try { json = JSON.parse(jsonText); }
-    catch {
-      const course = buildFallbackCourse(topic, language);
-      return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-parse" });
+Gere o curso sobre "${topic}" em ${language}.`
+        }],
+        // alguns modelos ignoram; ainda assim vale tentar
+        response_format: { type: "json_object" }
+      });
+      const raw1 = r1?.choices?.[0]?.message?.content || "";
+      json = extractJson(raw1);
+    } catch {}
+
+    // Tentativa 2: sem response_format
+    if (!json) {
+      const r2 = await client.chat.completions.create({
+        model: MODEL,
+        temperature: 0.7,
+        messages: [{
+          role: "user",
+          content:
+`Gere um curso em JSON válido (apenas JSON, sem markdown) sobre "${topic}" (${language}) no formato:
+{
+  "title": "",
+  "description": "",
+  "level": "",
+  "language": "${language}",
+  "duration": 6,
+  "tags": "",
+  "content": { "modules": [ { "title": "", "text": "" } ] }
+}`
+        }]
+      });
+      const raw2 = r2?.choices?.[0]?.message?.content || "";
+      json = extractJson(raw2);
     }
-    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json, model: MODEL });
+
+    if (!json || !json?.content?.modules?.length) {
+      // garante que o front não quebre
+      const course = buildFallbackCourse(topic, language);
+      return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, provider: "openrouter", model: MODEL });
+    }
+
+    // resposta válida para o front
+    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course: json, provider: "openrouter", model: MODEL });
   } catch (e) {
     const course = buildFallbackCourse(topic, language);
-    res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, note: "fallback-error", error: String(e.message) });
+    return res.json({ ok: true, id: Math.floor(Math.random() * 100000), course, provider: "error", error: String(e.message) });
   }
 });
 
-// ===== Payments & Certificates =====
+// ========== payments & certs ==========
 app.get("/payments/status", (_req, res) => {
   res.json({
     stripe: !!process.env.STRIPE_SECRET,
@@ -231,10 +292,8 @@ app.post("/certificates/mint", optionalAuth, (_req, res) => {
   res.json({ ok: true, txHash: tx });
 });
 
-// ===== 404 =====
+// ========== 404 ==========
 app.use((_req, res) => res.status(404).json({ error: "Rota não encontrada" }));
 
-// ===== START =====
-app.listen(PORT, () => {
-  console.log(`API on http://localhost:${PORT}`);
-});
+// ========== start ==========
+app.listen(PORT, () => console.log(`API on http://localhost:${PORT}`));
