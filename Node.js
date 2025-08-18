@@ -1,14 +1,18 @@
-import express from "express";
+import OpenAI from "openai";
 import dotenv from "dotenv";
 
 dotenv.config();
-const app = express();
 
-app.get("/status", (req, res) => {
-  res.json({
-    server: "online",
-    openai: process.env.OPENAI_API_KEY ? true : false
-  });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  project: process.env.OPENAI_PROJECT_ID,
 });
 
-app.listen(3000, () => console.log("Servidor rodando na porta 3000"));
+// Teste rápido
+(async () => {
+  const response = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: "Olá, tudo bem?" }],
+  });
+  console.log(response.choices[0].message.content);
+})();
