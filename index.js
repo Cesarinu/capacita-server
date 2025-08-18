@@ -84,7 +84,10 @@ app.get("/ai/ping", async (_req, res) => {
   }
   try {
     const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      project: process.env.OPENAI_PROJECT || process.env.OPENAI_PROJECT_ID || undefined
+    });
     // chamada simples e barata para validar chave
     const r = await client.chat.completions.create({
       model: "gpt-4o-mini",
@@ -140,7 +143,10 @@ app.post("/mentor/ask", optionalAuth, async (req, res) => {
 
   try {
     const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      project: process.env.OPENAI_PROJECT || process.env.OPENAI_PROJECT_ID || undefined
+    });
     const r = await client.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.6,
@@ -184,7 +190,10 @@ app.post("/courses/generate", optionalAuth, async (req, res) => {
   }
   try {
     const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      project: process.env.OPENAI_PROJECT || process.env.OPENAI_PROJECT_ID || undefined
+    });
     const prompt = `
 Gere um curso JSON válido sobre "${topic}" (${language}) exatamente no formato:
 {
